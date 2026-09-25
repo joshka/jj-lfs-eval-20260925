@@ -267,9 +267,11 @@ def file_dir(f):
     f.seed()
     (f.root / "asset.bin").unlink()
     f.write("asset.bin/child.txt", "directory replacement")
-    f.jj("status")
-    f.observations["files"] = f.files()
-    f.check("File-to-directory transition completes without panic", True)
+    cp = f.jj("status", ok=False)
+    f.observations["status"] = {"rc": cp.returncode, "stderr": cp.stderr.decode()}
+    f.check("File-to-directory transition completes without panic", cp.returncode == 0)
+    if cp.returncode == 0:
+        f.observations["files"] = f.files()
 
 
 def literal_pointer(f, payload):
@@ -310,7 +312,9 @@ def sparse(f, dirty=False):
     exists = (f.root / "assets/asset.bin").exists()
     f.observations["sparse"] = {"rc": cp.returncode, "stderr": cp.stderr.decode(), "asset_exists": exists}
     if dirty:
-        f.check("Sparse exclusion preserves or rejects unsnapshotted local edits", cp.returncode != 0 or exists)
+        saved = f.jj("--ignore-working-copy", "file", "show", "assets/asset.bin", ok=False).stdout
+        f.check("Sparse exclusion preserves, snapshots, or rejects local edits", cp.returncode != 0 or exists or saved == OTHER,
+                stored_sha256=sha(saved), edited_sha256=sha(OTHER))
     else:
         f.jj("sparse", "reset")
         f.g("lfs", "checkout")
@@ -321,11 +325,14 @@ def workspace(f):
     f.seed()
     other = f.root.parent / (f.root.name + "-workspace")
     f.jj("workspace", "add", str(other))
+    f.bytes_check("Additional workspace initially contains pointer", (other / "asset.bin").read_bytes(), pointer(PAYLOAD))
     cp = f.run(["git", "lfs", "checkout"], cwd=other, ok=False)
     f.observations["plain_git_lfs"] = {"rc": cp.returncode, "stderr": cp.stderr.decode()}
     st = f.run([f.suite.jj, "status"], cwd=other)
-    f.check("Additional workspace preserves pointer until external hydration", (other / "asset.bin").read_bytes() == pointer(PAYLOAD), status=st.stdout.decode())
-    f.check("Missing Git context reported with nonzero exit", cp.returncode != 0)
+    f.observations["git_context"] = (other / ".git").read_text() if (other / ".git").is_file() else "absent"
+    f.check("Colocated additional workspace supports external hydration", cp.returncode == 0 and (other / "asset.bin").read_bytes() == PAYLOAD, status=st.stdout.decode())
+    stored = f.run([f.suite.jj, "file", "show", "asset.bin"], cwd=other).stdout
+    f.bytes_check("Hydrated additional workspace retains stored pointer", stored, pointer(PAYLOAD))
 
 
 def attrs_permission(f):
@@ -383,7 +390,7 @@ def performance(f):
             f.jj("--config=" + conf, "status", timeout=90)
             times[name].append(time.monotonic() - start)
     f.observations["timings_seconds"] = times
-    f.observations["fixture"] = "3000 ordinary files, 120 nested attribute files, same debug binary, warm runs"
+    f.observations["fixture"] = "3000 ordinary files, 120 nested attribute files, same binary, warm runs"
     f.check("All ordinary files remain tracked", len(f.files()) == 3122)
 
 
